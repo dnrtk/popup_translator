@@ -140,3 +140,64 @@
 - **出力先**: `wails3 build` は `bin/yaku.exe` を出力する。llama.cpp は `bin/llama/` に置くので、実行時は「exe と同じ階層の `llama/llama-server.exe`」を探す。`bin/` はディレクトリごと gitignore する。
 - **テンプレートから削ったもの**: Wails テンプレートの android / ios / darwin のビルド定義は削除した。Linux は後のフェーズで使うので残している。
 - **アイコン生成**: Wails の `generate icons` は、引数で指定しなくても mac 用アイコンを出力しようとする。そのため `build/darwin/` を空のまま残し、生成される `*.icns` は gitignore している。
+
+---
+
+## フェーズ1 実装上の判断
+
+### llama-server の起動引数
+`-m <model> -ngl <n> --host 127.0.0.1 --port <空きポート> -c <ctx> -np 1 [-t <threads>]` で起動する。
+
+- **`-np 1` を付ける理由**: b12283 では `--parallel` の既定値が `-1`(auto)になっている。auto のままだとスロットが複数作られ、`-c 8192` がスロット数で分割されるおそれがある。翻訳は1件ずつしか流さないので、スロットを1つに固定する。
+- **Web UI について**: 無効化するフラグ(`--no-webui`)は b12283 には無い。127.0.0.1 だけで待ち受けているので、そのままにしている。
+
+### Job Object
+- `CREATE_NO_WINDOW` で起動したあと、すぐに `AssignProcessToJobObject` で Job に入れる。
+  - Job は `JOB_OBJECT_LIMIT_KILL_ON_JOB_CLOSE` を付けてプロセス全体で1つ作る。ハンドルは閉じずに持ち続ける。
+  - 起動から Job に入れるまでの間にわずかな隙間があるが、許容範囲と判断した。
+- `internal/llama/job_windows_test.go` で、親プロセスを `TerminateProcess` したら子プロセスも消えることを自動テストしている。
+  - Job に入れる処理を一時的に外すとこのテストが失敗することも確認した。テスト自体が問題を検出できる。
+
+### ポップアップのフォーカス
+- Wails の `Focus()` は `SetForegroundWindow` を呼ぶだけになっている。そこで、先に `forceForeground` を UI スレッドで実行してから `Focus()` を呼ぶ。
+- `forceForeground` は、`AttachThreadInput` で現在の前面ウィンドウのスレッドに一時的に接続し、`BringWindowToTop`、`SetForegroundWindow`、`SetFocus` を順に呼ぶ。
+
+### ポップアップの位置
+- カーソル位置(物理ピクセル)から、そのカーソルがあるモニターの作業領域を求め、カーソルの右下に表示する。
+- はみ出す場合は左や上に反転し、それでも収まらなければ作業領域の内側に寄せる。最後に DIP 座標に変換して `SetBounds` する。
+- 既定は「カーソルの近く」に表示し、`popup_position: "remember"` を設定すると前回の位置に表示する。サイズは常に記憶する。
+- SPEC には「カーソル近くに表示」と「位置を記憶」の両方が書かれているため、既定値と設定項目を分ける形で両立させた。
+
+### 致命的エラーの通知
+- Wails v3 の通知サービスは、Windows では `HKCU\Software\Classes\CLSID` に COM サーバーを登録する。レジストリに痕跡が残るため、フェーズ1では使わない。
+- 代わりに、llama-server が再起動後も失敗したら、トレイのツールチップを更新し、エラーダイアログを1回だけ出す。
+- トースト通知に切り替えるかどうかはフェーズ2で再検討する。
+
+### 二重起動の防止
+- Wails v3 の `SingleInstance` 機能を使う。Windows では名前付き Mutex `com.dnrtk.yaku-sim` を `CreateMutex` で作る仕組み。
+
+### 動作確認用のビルド
+- 本物のフックは他のアプリが合成したキー入力を無視するため、自動テストではホットキーを発火させられない。
+- そこで `-tags devtrigger` を付けたビルドでは、起動の `YAKU_DEV_TRIGGER_DELAY` 後に1回だけホットキー処理を直接呼ぶ。リリースビルドには含まれない。
+
+---
+
+## フェーズ1 動作確認(2026-11-12、0.8B Q4_K_M、CPU `-ngl 0`、1920x1080)
+
+| 項目 | 方法 | 結果 |
+|---|---|---|
+| 英文 → 日本語 | devtrigger ビルドで実行 | OK。「ローカル推論により、ドキュメントを自身のマシン上に保持できます。…」 |
+| 和文 → 英語 | devtrigger ビルドで実行 | OK。「The meeting has been rescheduled for next Monday. Please share the materials by the day before.」 |
+| 「検出: 日本語/その他」の表示 | スクリーンショットで確認 | OK |
+| プルダウンで訳し直し | ポップアップに Tab と ↓ を送り、英語から中国語(簡体字)に変更 | OK。「会议已改到下周一。请在前一天分享资料。」 |
+| ポップアップが前面に出てフォーカスを取る | 発火後の前面ウィンドウを確認し、送ったキーがポップアップに届くことを確認 | OK |
+| Esc で閉じる | Esc を送り、`IsWindowVisible` で確認 | OK |
+| 強制終了しても llama-server が残らない | `Stop-Process -Force` で yaku を終了し、プロセス一覧を確認 | OK(残存 0) |
+| 二重起動の防止 | 2つ目を起動 | OK。2つ目は終了コード 0 ですぐ終了した |
+| 原文と訳文をログに残さない | `logs\*.log` を原文で検索 | OK。どちらも見つからなかった |
+| 時間の目安 | `yaku.log` | アプリ起動からモデルの準備完了まで約 4.6 秒。翻訳は 20 トークン前後で 0.4〜0.5 秒 |
+
+**手作業での確認が必要な項目**(合成キーは無視する仕様のため、自動化できない)
+- ブラウザ、VS Code、Word で、実際に Ctrl を押したまま C を2連打したときに発火すること。
+- 通常の Ctrl+C を妨げないこと。
+- しばらく常駐させたあと(起動直後の特例が効かない状態)でも、ポップアップがフォーカスを取れること。今回の確認は起動直後に行っている。

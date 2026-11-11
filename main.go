@@ -7,52 +7,113 @@ package main
 
 import (
 	"embed"
-	"log"
+	"fmt"
+	"log/slog"
+	"os"
+	"path/filepath"
 
 	"github.com/wailsapp/wails/v3/pkg/application"
+
+	"github.com/dnrtk/popup_translator/internal/app"
+	"github.com/dnrtk/popup_translator/internal/config"
 )
 
 //go:embed all:frontend/dist
 var assets embed.FS
 
+//go:embed build/windows/icon.ico
+var trayIcon []byte
+
 func main() {
-	app := application.New(application.Options{
+	if err := run(); err != nil {
+		fmt.Fprintln(os.Stderr, "yaku:", err)
+		os.Exit(1)
+	}
+}
+
+func run() error {
+	cfgPath, err := config.DefaultPath()
+	if err != nil {
+		return err
+	}
+	cfg, cfgErr := config.Load(cfgPath)
+
+	logger, closeLog := newLogger(cfg.Debug)
+	defer closeLog()
+	if cfgErr != nil {
+		logger.Error("load config; using defaults", "path", cfgPath, "err", cfgErr)
+	}
+
+	core := app.New(cfgPath, cfg, logger)
+
+	wapp := application.New(application.Options{
 		Name:        "Yaku",
 		Description: "Local popup translator powered by PLaMo 3 Translate",
+		Services: []application.Service{
+			application.NewService(app.NewPopupService(core)),
+		},
 		Assets: application.AssetOptions{
 			Handler: application.AssetFileServerFS(assets),
 		},
+		SingleInstance: &application.SingleInstanceOptions{
+			// Windows: named mutex "com.dnrtk.yaku-sim".
+			UniqueID: "com.dnrtk.yaku",
+		},
 		Windows: application.WindowsOptions{
-			// Keep running in the tray even when the popup is hidden.
 			DisableQuitOnLastWindowClosed: true,
 		},
+		OnShutdown: core.Shutdown,
 	})
 
-	popup := app.Window.NewWithOptions(application.WebviewWindowOptions{
+	geo := cfg.Popup
+	popup := wapp.Window.NewWithOptions(application.WebviewWindowOptions{
 		Name:        "popup",
 		Title:       "Yaku",
-		Width:       520,
-		Height:      360,
+		Width:       geo.Width,
+		Height:      geo.Height,
+		MinWidth:    320,
+		MinHeight:   220,
 		Hidden:      true,
 		AlwaysOnTop: true,
 		URL:         "/",
 	})
 
-	menu := app.NewMenu()
-	menu.Add("Show popup (debug)").OnClick(func(*application.Context) {
-		popup.Show()
-		popup.Focus()
-	})
-	menu.AddSeparator()
-	menu.Add("Quit").OnClick(func(*application.Context) {
-		app.Quit()
-	})
-
-	tray := app.SystemTray.New()
-	tray.SetTooltip("Yaku")
+	tray := wapp.SystemTray.New()
+	tray.SetIcon(trayIcon)
+	tray.SetTooltip("Yaku - 起動中")
+	menu := wapp.NewMenu()
+	menu.Add("終了").OnClick(func(*application.Context) { wapp.Quit() })
 	tray.SetMenu(menu)
 
-	if err := app.Run(); err != nil {
-		log.Fatal(err)
+	core.Attach(wapp, popup, tray)
+	core.Start()
+
+	return wapp.Run()
+}
+
+// newLogger writes to %APPDATA%\Yaku\logs\yaku.log (falls back to stderr).
+func newLogger(debug bool) (*slog.Logger, func()) {
+	level := slog.LevelInfo
+	if debug {
+		level = slog.LevelDebug
 	}
+	opts := &slog.HandlerOptions{Level: level}
+	dir, err := app.LogDir()
+	if err == nil {
+		err = os.MkdirAll(dir, 0o755)
+	}
+	if err != nil {
+		return slog.New(slog.NewTextHandler(os.Stderr, opts)), func() {}
+	}
+	// Append (a second instance runs this before Wails' single-instance
+	// check exits it) and rotate once the file grows past 1 MiB.
+	path := filepath.Join(dir, "yaku.log")
+	if st, err := os.Stat(path); err == nil && st.Size() > 1<<20 {
+		_ = os.Rename(path, path+".old")
+	}
+	f, err := os.OpenFile(path, os.O_CREATE|os.O_APPEND|os.O_WRONLY, 0o644)
+	if err != nil {
+		return slog.New(slog.NewTextHandler(os.Stderr, opts)), func() {}
+	}
+	return slog.New(slog.NewTextHandler(f, opts)), func() { f.Close() }
 }
