@@ -38,11 +38,17 @@
 | en→ja polite | 上の `plain` を `polite` に置き換えたもの |
 
 ### 実装方針
-- 原文に `<|plamo:` が含まれる場合は、`<` の後ろにゼロ幅文字を入れて無害化するのではなく、**エラーとしてポップアップに表示する**。原文を改変しないことを優先するため。※要確認
+- 原文に `<|plamo:` が含まれる場合は、**エラーとしてポップアップに表示する**(確定)。
 - 原文の空白はそのまま渡す。chat template にも "Preserve all text whitespace" とある。
 
-### フェーズ1の実装中に実機で確認すること
-- llama-server の `/completion` が、プロンプト文字列中の `<|plamo:tag|>` などを**特殊トークンとして**トークナイズするか。`/tokenize` に `"with_pieces": true` を付けて確認する。
+### 実機確認(2026-11-11、b12283 Vulkan、0.8B Q4_K_M、`-ngl 0`)
+- `/tokenize`(`add_special: true`, `with_pieces: true`)の結果は `1:<|plamo:bos|> | 16:<|plamo:tag|> | 48472:dataset | 19:<|plamo:msg|> | …` だった。
+  - プロンプト文字列中のタグは**特殊トークンとして解釈される**。
+  - BOS も自動で付く。
+- `/completion` に ja→en の例を送ると `"The meeting has been rescheduled for next Monday."` が返った。
+  - `stop_type=eos` だった。モデルが EOS(= `<|plamo:bos|>`)を出して止まっている。
+- en→ja polite の例では `"このシステムは便利です。"` が返った。
+- 原文に `<|plamo:` が含まれる場合は、エラーとしてポップアップに表示する。ユーザーの了承を得て確定した。
 
 ---
 
@@ -121,4 +127,16 @@
 - ライセンス本文: https://plamo.preferredai.jp/info/plamo-community-license-ja
 
 ## ローカル環境(2026-11-11)
-- Go 1.26.5 / Node v24.14.1 / wails3 CLI は未インストール
+- Go 1.26.5 / Node v24.14.1 / wails3 CLI v3.1.0(`go install` で導入)
+
+---
+
+## プロジェクト構成の決定(SPEC 3章からの変更)
+
+- **エントリポイントは `/cmd/app` ではなくリポジトリ直下の `main.go` にする**。理由は次の2つ。
+  - `//go:embed all:frontend/dist` は、親ディレクトリを参照できない。
+  - `wails3 generate syso` が出力するアイコン・マニフェストの `.syso` はリポジトリ直下に置かれ、main パッケージと同じディレクトリにないとリンクされない。
+  - `cmd/app` に移すと、Wails 標準の Taskfile を何か所も書き換える必要があり、メリットに見合わない。
+- **出力先**: `wails3 build` は `bin/yaku.exe` を出力する。llama.cpp は `bin/llama/` に置くので、実行時は「exe と同じ階層の `llama/llama-server.exe`」を探す。`bin/` はディレクトリごと gitignore する。
+- **テンプレートから削ったもの**: Wails テンプレートの android / ios / darwin のビルド定義は削除した。Linux は後のフェーズで使うので残している。
+- **アイコン生成**: Wails の `generate icons` は、引数で指定しなくても mac 用アイコンを出力しようとする。そのため `build/darwin/` を空のまま残し、生成される `*.icns` は gitignore している。
