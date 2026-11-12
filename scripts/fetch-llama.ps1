@@ -30,7 +30,8 @@ $stampFile = Join-Path $destDir '.version'
 $entry = $Pinned[$Backend]
 $stamp = "$Version-$Backend"
 
-if (-not $Force -and (Test-Path $stampFile) -and ((Get-Content $stampFile -Raw).Trim() -eq $stamp)) {
+if (-not $Force -and (Test-Path $stampFile) -and ((Get-Content $stampFile -Raw).Trim() -eq $stamp) -and
+    (Test-Path (Join-Path $destDir 'LICENSE-llama.cpp'))) {
     Write-Host "llama.cpp $stamp is already installed in $destDir"
     exit 0
 }
@@ -57,6 +58,10 @@ try {
     if (-not (Test-Path (Join-Path $destDir 'llama-server.exe'))) {
         throw "llama-server.exe not found at the top level of $($entry.Asset)"
     }
+    # The release zip does not contain llama.cpp's own license (MIT); it must
+    # ship with redistributed binaries.
+    Invoke-WebRequest -Uri "https://raw.githubusercontent.com/ggml-org/llama.cpp/$Version/LICENSE" `
+        -OutFile (Join-Path $destDir 'LICENSE-llama.cpp')
     Set-Content -Path $stampFile -Value $stamp -NoNewline
     Write-Host "Installed llama.cpp $stamp to $destDir"
 }

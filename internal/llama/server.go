@@ -203,10 +203,10 @@ func (s *Server) WaitReady(ctx context.Context) (string, error) {
 		case StateReady:
 			return url, nil
 		case StateFailed:
-			return "", fmt.Errorf("%w: %v", ErrServerFailed, err)
+			return "", fmt.Errorf("%w: %w", ErrServerFailed, err)
 		case StateStopped:
 			if err != nil {
-				return "", fmt.Errorf("%w: %v", ErrServerFailed, err)
+				return "", fmt.Errorf("%w: %w", ErrServerFailed, err)
 			}
 		}
 		select {

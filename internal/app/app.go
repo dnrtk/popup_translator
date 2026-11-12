@@ -119,6 +119,9 @@ type App struct {
 	fatalShown bool
 	paused     atomic.Bool
 
+	started             atomic.Bool // Wails event loop is running
+	showSettingsOnStart atomic.Bool
+
 	mu       sync.Mutex
 	nextID   uint64
 	cancelTx context.CancelFunc
@@ -163,6 +166,12 @@ func (a *App) Attach(wapp *application.App, popup *application.WebviewWindow, tr
 		// Closing the popup only hides it; the app keeps running in the tray.
 		e.Cancel()
 		a.HidePopup()
+	})
+	wapp.Event.OnApplicationEvent(events.Common.ApplicationStarted, func(*application.ApplicationEvent) {
+		a.started.Store(true)
+		if a.showSettingsOnStart.Load() {
+			go a.ShowSettings()
+		}
 	})
 	popup.OnWindowEvent(events.Common.WindowLostFocus, func(*application.WindowEvent) {
 		if a.Config().CloseOnBlur {
@@ -214,13 +223,18 @@ func (a *App) Shutdown() {
 	}
 }
 
+// llamaServerPath returns the configured llama-server or <exe>/llama/llama-server.exe.
+func llamaServerPath(cfg config.Config) string {
+	if cfg.LlamaServerPath != "" {
+		return cfg.LlamaServerPath
+	}
+	return filepath.Join(executableDir(), "llama", "llama-server.exe")
+}
+
 // serverOptions resolves the llama-server options from cfg.
 func (a *App) serverOptions(cfg config.Config) (llama.Options, error) {
 	exeDir := executableDir()
-	llamaPath := cfg.LlamaServerPath
-	if llamaPath == "" {
-		llamaPath = filepath.Join(exeDir, "llama", "llama-server.exe")
-	}
+	llamaPath := llamaServerPath(cfg)
 	model, err := resolveModel(cfg.ModelPath, exeDir)
 	if err != nil {
 		return llama.Options{}, err
@@ -278,11 +292,17 @@ func (a *App) onServerState(st llama.State, err error) {
 		go a.warmup()
 	}
 	if a.wapp != nil {
-		ev := ServerStateEvent{State: st.String()}
-		if err != nil {
-			ev.Message = err.Error()
+		a.wapp.Event.Emit(EventServerState, serverStateEvent(st, err))
+	}
+	if st == llama.StateFailed && errors.Is(err, ErrNoModel) {
+		// First run: guide the user to the download section instead of an
+		// error dialog.
+		a.setTooltip("Yaku - モデルがありません(設定からダウンロードしてください)")
+		a.showSettingsOnStart.Store(true)
+		if a.started.Load() {
+			go a.ShowSettings()
 		}
-		a.wapp.Event.Emit(EventServerState, ev)
+		return
 	}
 	if st == llama.StateFailed {
 		a.mu.Lock()
@@ -325,9 +345,15 @@ func (a *App) warmup() {
 
 // ServerState returns the current llama-server state for the frontend.
 func (a *App) ServerState() ServerStateEvent {
-	st, err := a.server.State()
+	return serverStateEvent(a.server.State())
+}
+
+func serverStateEvent(st llama.State, err error) ServerStateEvent {
 	ev := ServerStateEvent{State: st.String()}
-	if err != nil {
+	switch {
+	case errors.Is(err, ErrNoModel):
+		ev.Message = "モデルがありません。「モデルのダウンロード」から取得してください。"
+	case err != nil:
 		ev.Message = err.Error()
 	}
 	return ev
@@ -475,7 +501,11 @@ func (a *App) run(ctx context.Context, id uint64, text, target string, form prom
 	baseURL, err := a.server.WaitReady(ctx)
 	if err != nil {
 		if ctx.Err() == nil {
-			a.emitError(id, "翻訳エンジンを起動できませんでした: "+err.Error())
+			msg := "翻訳エンジンを起動できませんでした: " + err.Error()
+			if errors.Is(err, ErrNoModel) {
+				msg = "モデルがありません。トレイの「設定...」→「モデルのダウンロード」から取得してください。"
+			}
+			a.emitError(id, msg)
 		}
 		return
 	}
@@ -661,6 +691,9 @@ func executableDir() string {
 	return filepath.Dir(exe)
 }
 
+// ErrNoModel means no GGUF file was found (typical on first run).
+var ErrNoModel = errors.New("no *.gguf model found")
+
 // resolveModel returns configured, or the best *.gguf in <exe>/models or
 // <exe>/../models (the latter matches the development layout bin/yaku.exe).
 func resolveModel(configured, exeDir string) (string, error) {
@@ -681,7 +714,7 @@ func resolveModel(configured, exeDir string) (string, error) {
 		})
 		return filepath.Clean(matches[0]), nil
 	}
-	return "", fmt.Errorf("no *.gguf model found in %s (run scripts/fetch-model.ps1 or set model_path)", strings.Join(dirs, ", "))
+	return "", fmt.Errorf("%w in %s", ErrNoModel, strings.Join(dirs, ", "))
 }
 
 // modelRank prefers the default 0.8B Q4_K_M, then smaller models.

@@ -45,3 +45,6 @@ models/
 
 # Generated macOS icon (Windows-only project for now)
 build/darwin/*.icns
+
+# Packaging output
+dist/

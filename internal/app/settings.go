@@ -70,14 +70,9 @@ func (a *App) settingsData() SettingsData {
 	}
 	a.mu.Lock()
 	d.ActiveModel = a.serverOpts.Model
-	exe := a.serverOpts.Exe
 	a.mu.Unlock()
-	if exe == "" {
-		if opts, err := a.serverOptions(cfg); err == nil {
-			exe = opts.Exe
-		}
-	}
-	if exe != "" {
+	// GPU detection only needs llama-server, not a model.
+	if exe := llamaServerPath(cfg); exe != "" {
 		ctx, cancel := context.WithTimeout(context.Background(), 15*time.Second)
 		defer cancel()
 		devs, err := llama.ListDevices(ctx, exe)

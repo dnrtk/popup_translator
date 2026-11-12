@@ -10,6 +10,7 @@ import (
 	"github.com/wailsapp/wails/v3/pkg/application"
 
 	"github.com/dnrtk/popup_translator/internal/download"
+	"github.com/dnrtk/popup_translator/internal/llama"
 )
 
 // EventDownload reports download progress to the settings window.
@@ -143,6 +144,10 @@ func (a *App) startDownload(file string) error {
 		case err == nil:
 			a.log.Info("download done", "file", file)
 			a.setDownloadStatus(DownloadStatus{File: file, State: DownloadDone, Done: info.Size, Total: info.Size})
+			// First model on this machine: start the engine right away.
+			if st, serr := a.server.State(); st == llama.StateFailed && errors.Is(serr, ErrNoModel) {
+				a.restartServer()
+			}
 		case errors.Is(err, context.Canceled):
 			a.log.Info("download canceled", "file", file)
 			a.setDownloadStatus(DownloadStatus{File: file, State: DownloadCanceled,

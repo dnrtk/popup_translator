@@ -12,7 +12,8 @@
   const COMMERCIAL_FORM = "https://forms.gle/mTL8tBLrMYXKNZD56";
 
   let catalog = $state<DownloadCatalog | null>(null);
-  let selected = $state("plamo-3-translate-2b-Q4_K_M.gguf");
+  // Recommended default for a first model.
+  let selected = $state("plamo-3-translate-0.8b-Q4_K_M.gguf");
   let agreed = $state(false);
   let error = $state("");
   let status = $state<DownloadStatus>({ file: "", state: "idle", done: 0, total: 0, message: "" });
@@ -113,7 +114,7 @@
         {status.state === "lookup" ? "ファイル情報を確認中…" : `${status.file}: ${gb(status.done)} / ${gb(status.total)}(${percent}%)`}
       </p>
     {:else if status.state === "done" && status.file}
-      <p class="small success">✓ {status.file} をダウンロードしました。上の「モデル」から選んで保存すると切り替わります。</p>
+      <p class="small success">✓ {status.file} をダウンロードしました。ほかにモデルがなければ自動で使い始めます。切り替えるときは、上の「モデル」で選んで保存してください。</p>
     {:else if status.state === "canceled"}
       <p class="small warning">⚠ {status.message}</p>
     {:else if status.state === "error"}

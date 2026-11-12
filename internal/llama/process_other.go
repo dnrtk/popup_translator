@@ -1,4 +1,4 @@
-//go:build !windows
+//go:build !windows && !linux
 
 package llama
 
@@ -9,5 +9,5 @@ import (
 
 func sysProcAttr() *syscall.SysProcAttr { return nil }
 
-// attachToJob is a no-op outside Windows (Linux will use PR_SET_PDEATHSIG).
+// attachToJob is a no-op on this platform.
 func attachToJob(*os.Process) error { return nil }

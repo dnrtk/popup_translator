@@ -258,11 +258,12 @@ func TestServerRestartKeepsWaiters(t *testing.T) {
 
 func TestServerFail(t *testing.T) {
 	s := NewServer(Options{}, nil)
-	s.Fail(errors.New("no model"))
+	cause := errors.New("no model")
+	s.Fail(cause)
 	ctx, cancel := context.WithTimeout(context.Background(), time.Second)
 	defer cancel()
-	if _, err := s.WaitReady(ctx); !errors.Is(err, ErrServerFailed) || !strings.Contains(err.Error(), "no model") {
-		t.Errorf("err = %v", err)
+	if _, err := s.WaitReady(ctx); !errors.Is(err, ErrServerFailed) || !errors.Is(err, cause) {
+		t.Errorf("err = %v; want both ErrServerFailed and the cause in the chain", err)
 	}
 }
 

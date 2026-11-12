@@ -221,7 +221,7 @@
           {#if (selectedModel ?? autoModel)}
             <p class="help muted">目安: {(selectedModel ?? autoModel)!.hint}</p>
           {:else}
-            <p class="help error">models フォルダに GGUF ファイルがありません。</p>
+            <p class="help error">モデルがありません。下の「モデルのダウンロード」から取得してください(おすすめ: 0.8B Q4_K_M、約 0.57 GB)。</p>
           {/if}
           <div class="row">
             <button onclick={() => SettingsService.OpenModelsFolder()}>モデルフォルダを開く</button>
