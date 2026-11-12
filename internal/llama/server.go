@@ -82,6 +82,10 @@ type Server struct {
 // NewServer creates a supervisor. onState (may be nil) is called on every
 // state change from the supervisor goroutine.
 func NewServer(opts Options, onState func(State, error)) *Server {
+	return &Server{opts: withDefaults(opts), onState: onState, changed: make(chan struct{})}
+}
+
+func withDefaults(opts Options) Options {
 	if opts.StartupTimeout <= 0 {
 		opts.StartupTimeout = 3 * time.Minute
 	}
@@ -97,7 +101,7 @@ func NewServer(opts Options, onState func(State, error)) *Server {
 	if opts.PollInterval <= 0 {
 		opts.PollInterval = 200 * time.Millisecond
 	}
-	return &Server{opts: opts, onState: onState, changed: make(chan struct{})}
+	return opts
 }
 
 // Args returns the llama-server command-line arguments for port.
@@ -118,18 +122,26 @@ func (o Options) Args(port int) []string {
 }
 
 // Start launches the supervisor. It returns immediately; use WaitReady.
+// If the executable or model is missing, the state becomes StateFailed so
+// that WaitReady callers are released.
 func (s *Server) Start() error {
 	s.mu.Lock()
-	defer s.mu.Unlock()
 	if s.done != nil {
+		s.mu.Unlock()
 		return errors.New("server already started")
 	}
+	var verr error
 	if _, err := os.Stat(s.opts.Exe); err != nil {
-		return fmt.Errorf("llama-server executable: %w", err)
+		verr = fmt.Errorf("llama-server executable: %w", err)
+	} else if _, err := os.Stat(s.opts.Model); err != nil {
+		verr = fmt.Errorf("model file: %w", err)
 	}
-	if _, err := os.Stat(s.opts.Model); err != nil {
-		return fmt.Errorf("model file: %w", err)
+	if verr != nil {
+		s.mu.Unlock()
+		s.setState(StateFailed, verr, "")
+		return verr
 	}
+	defer s.mu.Unlock()
 	ctx, cancel := context.WithCancel(context.Background())
 	s.cancel = cancel
 	s.done = make(chan struct{})
@@ -156,6 +168,22 @@ func (s *Server) Stop() {
 	s.done = nil
 	s.mu.Unlock()
 	s.setState(StateStopped, nil, "")
+}
+
+// Restart stops the running process (if any), replaces the options and
+// starts again. Callers blocked in WaitReady keep waiting for the new process.
+func (s *Server) Restart(opts Options) error {
+	s.Stop()
+	s.mu.Lock()
+	s.opts = withDefaults(opts)
+	s.mu.Unlock()
+	return s.Start()
+}
+
+// Fail marks the server as failed without starting it (e.g. no model).
+func (s *Server) Fail(err error) {
+	s.Stop()
+	s.setState(StateFailed, err, "")
 }
 
 // State returns the current state and the last error.

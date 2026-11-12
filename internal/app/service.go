@@ -48,3 +48,8 @@ func (s *PopupService) Copy(text string) bool {
 func (s *PopupService) Hide() {
 	s.app.HidePopup()
 }
+
+// ServerState returns the llama-server state.
+func (s *PopupService) ServerState() ServerStateEvent {
+	return s.app.ServerState()
+}

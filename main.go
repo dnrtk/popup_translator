@@ -51,6 +51,7 @@ func run() error {
 		Description: "Local popup translator powered by PLaMo 3 Translate",
 		Services: []application.Service{
 			application.NewService(app.NewPopupService(core)),
+			application.NewService(app.NewSettingsService(core)),
 		},
 		Assets: application.AssetOptions{
 			Handler: application.AssetFileServerFS(assets),
@@ -78,14 +79,37 @@ func run() error {
 		URL:         "/",
 	})
 
+	settings := wapp.Window.NewWithOptions(application.WebviewWindowOptions{
+		Name:      "settings",
+		Title:     "Yaku の設定",
+		Width:     640,
+		Height:    760,
+		MinWidth:  480,
+		MinHeight: 480,
+		Hidden:    true,
+		URL:       "/?view=settings",
+	})
+
 	tray := wapp.SystemTray.New()
 	tray.SetIcon(trayIcon)
 	tray.SetTooltip("Yaku - 起動中")
 	menu := wapp.NewMenu()
+	menu.Add("設定...").OnClick(func(*application.Context) { core.ShowSettings() })
+	menu.AddCheckbox("一時停止(ホットキーを無効化)", false).OnClick(func(ctx *application.Context) {
+		core.SetPaused(ctx.ClickedMenuItem().Checked())
+	})
+	menu.Add("ログフォルダを開く").OnClick(func(*application.Context) {
+		if err := core.OpenLogFolder(); err != nil {
+			logger.Error("open log folder", "err", err)
+		}
+	})
+	menu.AddSeparator()
 	menu.Add("終了").OnClick(func(*application.Context) { wapp.Quit() })
 	tray.SetMenu(menu)
+	tray.OnClick(func() { core.ShowSettings() })
 
 	core.Attach(wapp, popup, tray)
+	core.AttachSettings(settings)
 	core.Start()
 
 	return wapp.Run()

@@ -7,6 +7,7 @@ import (
 	"fmt"
 	"runtime"
 	"sync"
+	"sync/atomic"
 	"time"
 	"unsafe"
 
@@ -61,8 +62,21 @@ var (
 
 type watcher struct {
 	detector *Detector
+	interval atomic.Int64 // nanoseconds; applied to detector on each event
 	out      chan<- time.Time
 	paused   func() bool
+}
+
+// SetInterval changes the double-press interval of the running watcher.
+func SetInterval(d time.Duration) {
+	if d <= 0 {
+		d = DefaultInterval
+	}
+	activeMu.Lock()
+	defer activeMu.Unlock()
+	if active != nil {
+		active.interval.Store(int64(d))
+	}
 }
 
 // Watch installs a WH_KEYBOARD_LL hook on a dedicated OS thread and sends on
@@ -71,6 +85,7 @@ type watcher struct {
 func Watch(ctx context.Context, interval time.Duration, paused func() bool) (<-chan time.Time, error) {
 	out := make(chan time.Time, 1)
 	w := &watcher{detector: NewDetector(interval), out: out, paused: paused}
+	w.interval.Store(int64(w.detector.Interval))
 
 	activeMu.Lock()
 	if active != nil {
@@ -148,6 +163,7 @@ func lowLevelKeyboardProc(nCode uintptr, wParam uintptr, lParam uintptr) uintptr
 				Injected: kb.Flags&(llkhfInjected|llkhfLowerIL) != 0,
 				Time:     time.Now(),
 			}
+			w.detector.Interval = time.Duration(w.interval.Load())
 			if w.detector.Feed(ev) && (w.paused == nil || !w.paused()) {
 				select {
 				case w.out <- ev.Time:

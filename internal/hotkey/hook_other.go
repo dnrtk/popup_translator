@@ -12,3 +12,6 @@ import (
 func Watch(ctx context.Context, interval time.Duration, paused func() bool) (<-chan time.Time, error) {
 	return nil, errors.New("global hotkey is not supported on this platform")
 }
+
+// SetInterval is a no-op on this platform.
+func SetInterval(time.Duration) {}

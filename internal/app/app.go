@@ -13,6 +13,7 @@ import (
 	"sort"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"time"
 	"unicode/utf8"
 
@@ -34,6 +35,10 @@ const (
 	EventChunk  = "translate:chunk"
 	EventDone   = "translate:done"
 	EventError  = "translate:error"
+	// EventServerState reports llama-server lifecycle changes.
+	EventServerState = "server:state"
+	// EventSettingsOpen asks the settings window to reload its data.
+	EventSettingsOpen = "settings:open"
 )
 
 // Status values shown in the popup.
@@ -72,6 +77,13 @@ type DoneEvent struct {
 	Text string `json:"text"`
 }
 
+// ServerStateEvent reports the llama-server state ("starting", "ready",
+// "stopped" while restarting, "failed").
+type ServerStateEvent struct {
+	State   string `json:"state"`
+	Message string `json:"message"`
+}
+
 // ErrorEvent reports a failure of translation ID.
 type ErrorEvent struct {
 	ID      uint64 `json:"id"`
@@ -84,14 +96,17 @@ func init() {
 	application.RegisterEvent[ChunkEvent](EventChunk)
 	application.RegisterEvent[DoneEvent](EventDone)
 	application.RegisterEvent[ErrorEvent](EventError)
+	application.RegisterEvent[ServerStateEvent](EventServerState)
+	application.RegisterEvent[bool](EventSettingsOpen)
 }
 
 // App is the application core.
 type App struct {
-	wapp  *application.App
-	popup *application.WebviewWindow
-	tray  *application.SystemTray
-	log   *slog.Logger
+	wapp     *application.App
+	popup    *application.WebviewWindow
+	settings *application.WebviewWindow
+	tray     *application.SystemTray
+	log      *slog.Logger
 
 	cfgPath string
 	cfgMu   sync.Mutex
@@ -99,7 +114,9 @@ type App struct {
 
 	server     *llama.Server
 	serverLog  io.WriteCloser
+	serverOpts llama.Options // options of the running (or last attempted) server
 	fatalShown bool
+	paused     atomic.Bool
 
 	mu       sync.Mutex
 	nextID   uint64
@@ -111,7 +128,9 @@ type App struct {
 
 // New creates the core. Call Attach after the Wails app and windows exist.
 func New(cfgPath string, cfg config.Config, logger *slog.Logger) *App {
-	return &App{cfgPath: cfgPath, cfg: cfg, log: logger}
+	a := &App{cfgPath: cfgPath, cfg: cfg, log: logger}
+	a.server = llama.NewServer(llama.Options{}, a.onServerState)
+	return a
 }
 
 // Config returns a copy of the current configuration.
@@ -160,7 +179,7 @@ func (a *App) Start() {
 	ctx, cancel := context.WithCancel(context.Background())
 	a.stopHotkey = cancel
 	interval := time.Duration(a.Config().HotkeyIntervalMs) * time.Millisecond
-	fired, err := hotkey.Watch(ctx, interval, nil)
+	fired, err := hotkey.Watch(ctx, interval, a.paused.Load)
 	if err != nil {
 		a.log.Error("hotkey hook", "err", err)
 		a.setTooltip("Yaku - ホットキーを登録できませんでした")
@@ -183,16 +202,14 @@ func (a *App) Shutdown() {
 		a.cancelTx()
 	}
 	a.mu.Unlock()
-	if a.server != nil {
-		a.server.Stop()
-	}
+	a.server.Stop()
 	if a.serverLog != nil {
 		a.serverLog.Close()
 	}
 }
 
-func (a *App) startServer() {
-	cfg := a.Config()
+// serverOptions resolves the llama-server options from cfg.
+func (a *App) serverOptions(cfg config.Config) (llama.Options, error) {
 	exeDir := executableDir()
 	llamaPath := cfg.LlamaServerPath
 	if llamaPath == "" {
@@ -200,45 +217,65 @@ func (a *App) startServer() {
 	}
 	model, err := resolveModel(cfg.ModelPath, exeDir)
 	if err != nil {
-		a.onServerState(llama.StateFailed, err)
-		return
+		return llama.Options{}, err
 	}
-	logDir, err := LogDir()
-	if err == nil {
-		err = os.MkdirAll(logDir, 0o755)
-	}
-	var logw io.Writer
-	if err == nil {
-		f, ferr := os.Create(filepath.Join(logDir, "llama-server.log"))
-		if ferr == nil {
-			a.serverLog = f
-			logw = f
-		}
-	}
-	a.log.Info("starting llama-server", "exe", llamaPath, "model", model, "ngl", cfg.GPULayers, "ctx", cfg.ContextSize)
-	a.server = llama.NewServer(llama.Options{
+	return llama.Options{
 		Exe:         llamaPath,
 		Model:       model,
 		GPULayers:   cfg.GPULayers,
 		ContextSize: cfg.ContextSize,
 		Threads:     cfg.Threads,
-		Log:         logw,
-	}, a.onServerState)
-	if err := a.server.Start(); err != nil {
-		a.server = nil
-		a.onServerState(llama.StateFailed, err)
+		Log:         a.serverLog,
+	}, nil
+}
+
+func (a *App) startServer() {
+	if dir, err := LogDir(); err == nil && os.MkdirAll(dir, 0o755) == nil {
+		if f, err := os.Create(filepath.Join(dir, "llama-server.log")); err == nil {
+			a.serverLog = f
+		}
+	}
+	a.restartServer()
+}
+
+// restartServer (re)starts llama-server with the current configuration.
+// Translations waiting for the server keep waiting and run on the new one.
+func (a *App) restartServer() {
+	a.mu.Lock()
+	a.fatalShown = false
+	a.mu.Unlock()
+	opts, err := a.serverOptions(a.Config())
+	a.mu.Lock()
+	a.serverOpts = opts
+	a.mu.Unlock()
+	if err != nil {
+		a.server.Fail(err)
+		return
+	}
+	a.log.Info("starting llama-server", "exe", opts.Exe, "model", opts.Model, "ngl", opts.GPULayers,
+		"ctx", opts.ContextSize, "threads", opts.Threads)
+	if err := a.server.Restart(opts); err != nil {
+		a.log.Error("start llama-server", "err", err)
 	}
 }
 
+// SetPaused enables or disables the hotkey.
+func (a *App) SetPaused(p bool) {
+	a.paused.Store(p)
+	st, _ := a.server.State()
+	a.updateTooltip(st)
+}
 func (a *App) onServerState(st llama.State, err error) {
 	a.log.Info("llama-server state", "state", st.String(), "err", err)
-	switch st {
-	case llama.StateStarting:
-		a.setTooltip("Yaku - モデル読み込み中")
-	case llama.StateReady:
-		a.setTooltip("Yaku - 準備完了 (Ctrl+C+C で翻訳)")
-	case llama.StateFailed:
-		a.setTooltip("Yaku - 翻訳エンジンを起動できません")
+	a.updateTooltip(st)
+	if a.wapp != nil {
+		ev := ServerStateEvent{State: st.String()}
+		if err != nil {
+			ev.Message = err.Error()
+		}
+		a.wapp.Event.Emit(EventServerState, ev)
+	}
+	if st == llama.StateFailed {
 		a.mu.Lock()
 		show := !a.fatalShown
 		a.fatalShown = true
@@ -256,6 +293,34 @@ func (a *App) onServerState(st llama.State, err error) {
 			})
 		}
 	}
+}
+
+// ServerState returns the current llama-server state for the frontend.
+func (a *App) ServerState() ServerStateEvent {
+	st, err := a.server.State()
+	ev := ServerStateEvent{State: st.String()}
+	if err != nil {
+		ev.Message = err.Error()
+	}
+	return ev
+}
+
+func (a *App) updateTooltip(st llama.State) {
+	var s string
+	switch st {
+	case llama.StateStarting:
+		s = "Yaku - モデル読み込み中"
+	case llama.StateStopped:
+		s = "Yaku - 翻訳エンジン再起動中"
+	case llama.StateReady:
+		s = "Yaku - 準備完了 (Ctrl+C+C で翻訳)"
+	case llama.StateFailed:
+		s = "Yaku - 翻訳エンジンを起動できません"
+	}
+	if a.paused.Load() {
+		s += " [一時停止中]"
+	}
+	a.setTooltip(s)
 }
 
 func (a *App) setTooltip(s string) {
@@ -349,17 +414,10 @@ func (a *App) translate(text, target string, show bool) {
 }
 
 func (a *App) serverState() (llama.State, error) {
-	if a.server == nil {
-		return llama.StateFailed, errors.New("llama-server is not configured")
-	}
 	return a.server.State()
 }
 
 func (a *App) run(ctx context.Context, id uint64, promptText string, runes int, cfg config.Config) {
-	if a.server == nil {
-		a.emitError(id, "翻訳エンジンを起動できませんでした。ログを確認してください。")
-		return
-	}
 	baseURL, err := a.server.WaitReady(ctx)
 	if err != nil {
 		if ctx.Err() == nil {

@@ -33,7 +33,8 @@ func TestCompleteStreaming(t *testing.T) {
 		for _, tok := range []string{"The ", "meeting ", "moved."} {
 			sse(w, map[string]any{"content": tok, "stop": false})
 		}
-		sse(w, map[string]any{"content": "", "stop": true, "stop_type": "eos", "tokens_predicted": 3})
+		sse(w, map[string]any{"content": "", "stop": true, "stop_type": "eos", "tokens_predicted": 3,
+			"timings": map[string]any{"prompt_n": 20, "predicted_n": 3, "predicted_per_second": 120.5}})
 	}))
 	defer srv.Close()
 
@@ -44,7 +45,8 @@ func TestCompleteStreaming(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if res.Text != "The meeting moved." || res.StopType != "eos" || res.TokensPredicted != 3 {
+	if res.Text != "The meeting moved." || res.StopType != "eos" || res.TokensPredicted != 3 ||
+		res.Timings.PredictedPerSecond != 120.5 || res.Timings.PromptN != 20 {
 		t.Errorf("result = %+v", res)
 	}
 	if strings.Join(tokens, "|") != "The |meeting |moved." {

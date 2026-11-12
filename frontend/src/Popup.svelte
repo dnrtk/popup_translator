@@ -18,6 +18,16 @@
   let message = $state("");
   let output = $state("");
 
+  // llama-server state: "starting", "ready", "stopped" (restarting) or "failed".
+  let server = $state("ready");
+  // True from "stopped" until the restarted server is ready or has failed.
+  let restarting = $state(false);
+  function onServer(state: string) {
+    server = state;
+    if (state === "stopped") restarting = true;
+    else if (state === "ready" || state === "failed") restarting = false;
+  }
+
   let editing = $state(false);
   let copied = $state(false);
   let sourceEl: HTMLTextAreaElement | undefined = $state();
@@ -75,6 +85,7 @@
     PopupService.State().then((st) => {
       if (st.id > 0) apply(st);
     });
+    PopupService.ServerState().then((s) => onServer(s.state));
     const offs = [
       Events.On(Ev.PopupShow, (e) => apply(e.data)),
       Events.On(Ev.TranslateStatus, (e) => {
@@ -90,6 +101,7 @@
         output = e.data.text;
         status = "done";
       }),
+      Events.On(Ev.ServerState, (e) => onServer(e.data.state)),
       Events.On(Ev.TranslateError, (e) => {
         if (e.data.id !== id) return;
         status = "error";
@@ -124,7 +136,9 @@
       </select>
     </label>
     <span class="status" role="status" aria-live="polite">
-      {#if status === "loading"}
+      {#if restarting}
+        <span class="warning">翻訳エンジン再起動中…</span>
+      {:else if status === "loading"}
         モデル読み込み中…
       {:else if status === "translating"}
         翻訳中…
@@ -173,40 +187,6 @@
 </main>
 
 <style>
-  :global(:root) {
-    --bg: #ffffff;
-    --fg: #1f2328;
-    --muted: #656d76;
-    --border: #d0d7de;
-    --pane: #f6f8fa;
-    --accent: #0969da;
-    --accent-fg: #ffffff;
-    --error: #cf222e;
-    color-scheme: light dark;
-  }
-  @media (prefers-color-scheme: dark) {
-    :global(:root) {
-      --bg: #1e1f22;
-      --fg: #e6edf3;
-      --muted: #9198a1;
-      --border: #3d444d;
-      --pane: #262a30;
-      --accent: #4493f8;
-      --accent-fg: #0d1117;
-      --error: #ff7b72;
-    }
-  }
-  :global(html, body) {
-    margin: 0;
-    height: 100%;
-    background: var(--bg);
-    color: var(--fg);
-    font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", "Yu Gothic UI", "Yu Gothic", "Hiragino Sans", sans-serif;
-    font-size: 0.9375rem;
-  }
-  :global(#app) {
-    height: 100%;
-  }
   main {
     box-sizing: border-box;
     height: 100%;
@@ -227,14 +207,6 @@
   }
   .arrow {
     color: var(--muted);
-  }
-  select {
-    font: inherit;
-    padding: 0.2rem 0.4rem;
-    border: 1px solid var(--border);
-    border-radius: 6px;
-    background: var(--bg);
-    color: var(--fg);
   }
   .status {
     margin-left: auto;
@@ -283,12 +255,6 @@
     margin: 0;
     padding: 0.5rem 0.625rem;
   }
-  .muted {
-    color: var(--muted);
-  }
-  .error {
-    color: var(--error);
-  }
   .actions {
     display: flex;
     align-items: center;
@@ -301,35 +267,9 @@
     margin-left: auto;
     font-size: 0.875rem;
   }
-  button {
-    font: inherit;
-    font-size: 0.875rem;
-    padding: 0.25rem 0.75rem;
-    border: 1px solid var(--border);
-    border-radius: 6px;
-    background: var(--bg);
-    color: var(--fg);
-    cursor: pointer;
-  }
-  button:disabled {
-    opacity: 0.5;
-    cursor: default;
-  }
-  button.primary {
-    background: var(--accent);
-    border-color: var(--accent);
-    color: var(--accent-fg);
-  }
   kbd {
     font-family: "SF Mono", Menlo, Consolas, monospace;
     font-size: 0.75rem;
     opacity: 0.8;
-  }
-  .visually-hidden {
-    position: absolute;
-    width: 1px;
-    height: 1px;
-    overflow: hidden;
-    clip: rect(0 0 0 0);
   }
 </style>

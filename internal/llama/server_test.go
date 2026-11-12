@@ -212,6 +212,58 @@ func TestServerStartValidatesPaths(t *testing.T) {
 	if err := s.Start(); err == nil {
 		t.Error("expected error for missing executable")
 	}
+	// Waiters must be released with an error rather than block forever.
+	ctx, cancel := context.WithTimeout(context.Background(), time.Second)
+	defer cancel()
+	if _, err := s.WaitReady(ctx); !errors.Is(err, ErrServerFailed) {
+		t.Errorf("WaitReady err = %v, want ErrServerFailed", err)
+	}
+}
+
+// A translation waiting for readiness must survive a settings-triggered
+// restart and receive the new server's URL.
+func TestServerRestartKeepsWaiters(t *testing.T) {
+	var log stateLog
+	s, counter := newFakeServer(t, "ok", &log)
+	if err := s.Start(); err != nil {
+		t.Fatal(err)
+	}
+	defer s.Stop()
+	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+	defer cancel()
+	first, err := s.WaitReady(ctx)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	opts := s.opts
+	opts.ContextSize = 2048
+	if err := s.Restart(opts); err != nil {
+		t.Fatal(err)
+	}
+	second, err := s.WaitReady(ctx)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if first == second {
+		t.Errorf("expected a new port after restart, got %s twice", first)
+	}
+	if n := launches(t, counter); n != 2 {
+		t.Errorf("launches = %d", n)
+	}
+	if got := log.String(); got != "starting,ready,stopped,starting,ready" {
+		t.Errorf("states = %s", got)
+	}
+}
+
+func TestServerFail(t *testing.T) {
+	s := NewServer(Options{}, nil)
+	s.Fail(errors.New("no model"))
+	ctx, cancel := context.WithTimeout(context.Background(), time.Second)
+	defer cancel()
+	if _, err := s.WaitReady(ctx); !errors.Is(err, ErrServerFailed) || !strings.Contains(err.Error(), "no model") {
+		t.Errorf("err = %v", err)
+	}
 }
 
 func TestArgs(t *testing.T) {

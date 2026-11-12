@@ -65,12 +65,23 @@ type CompletionRequest struct {
 	Stop     []string
 }
 
+// Timings are reported by llama-server in the final stream message.
+type Timings struct {
+	PromptN            int     `json:"prompt_n"`
+	PromptMS           float64 `json:"prompt_ms"`
+	PromptPerSecond    float64 `json:"prompt_per_second"`
+	PredictedN         int     `json:"predicted_n"`
+	PredictedMS        float64 `json:"predicted_ms"`
+	PredictedPerSecond float64 `json:"predicted_per_second"`
+}
+
 // Result summarizes a finished completion.
 type Result struct {
 	Text            string
 	StopType        string // "eos", "word", "limit"
 	TokensPredicted int
 	Truncated       bool
+	Timings         Timings
 }
 
 type completionBody struct {
@@ -88,6 +99,7 @@ type streamChunk struct {
 	StopType        string          `json:"stop_type"`
 	TokensPredicted int             `json:"tokens_predicted"`
 	Truncated       bool            `json:"truncated"`
+	Timings         Timings         `json:"timings"`
 	Error           json.RawMessage `json:"error"`
 }
 
@@ -160,6 +172,7 @@ func (c *Client) Complete(ctx context.Context, cr CompletionRequest, onToken fun
 				StopType:        ch.StopType,
 				TokensPredicted: ch.TokensPredicted,
 				Truncated:       ch.Truncated,
+				Timings:         ch.Timings,
 			}, nil
 		}
 	}
