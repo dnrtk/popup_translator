@@ -46,6 +46,41 @@ func TestBuildGolden(t *testing.T) {
 				"<|plamo:tag|>input<|plamo:key|>lang<|plamo:val|>ja<|plamo:msg|>オーナーでフィルタリングすることもできます。" +
 				"<|plamo:tag|>output<|plamo:key|>lang<|plamo:val|>en<|plamo:msg|>",
 		},
+		{
+			// "Specifying translation history in PFML3" example, verbatim.
+			name: "history example from model card",
+			req: Request{
+				Text:       "オーナーでフィルタリングすることもできます。",
+				TargetLang: "en",
+				SourceLang: "ja",
+				History: []Pair{
+					{"プロジェクトの管理画面を開きます。", "Open the project dashboard."},
+					{"進行中のタスクがすべて表示されます。", "It lists all active tasks."},
+				},
+			},
+			want: "<|plamo:tag|>dataset<|plamo:msg|>translation" +
+				"<|plamo:tag|>input<|plamo:key|>lang<|plamo:val|>ja<|plamo:msg|>プロジェクトの管理画面を開きます。" +
+				"<|plamo:tag|>output<|plamo:key|>lang<|plamo:val|>en<|plamo:msg|>Open the project dashboard." +
+				"<|plamo:tag|>input<|plamo:key|>lang<|plamo:val|>ja<|plamo:msg|>進行中のタスクがすべて表示されます。" +
+				"<|plamo:tag|>output<|plamo:key|>lang<|plamo:val|>en<|plamo:msg|>It lists all active tasks." +
+				"<|plamo:tag|>input<|plamo:key|>lang<|plamo:val|>ja<|plamo:msg|>オーナーでフィルタリングすることもできます。" +
+				"<|plamo:tag|>output<|plamo:key|>lang<|plamo:val|>en<|plamo:msg|>",
+		},
+		{
+			// History without source_lang (how Yaku uses it); a stop token
+			// left at the end of a stored translation is removed.
+			name: "history auto-detect",
+			req: Request{
+				Text:       "Second.",
+				TargetLang: "ja",
+				History:    []Pair{{"First.", "一つ目。<|plamo:tag|>"}},
+			},
+			want: "<|plamo:tag|>dataset<|plamo:msg|>translation" +
+				"<|plamo:tag|>input<|plamo:msg|>First." +
+				"<|plamo:tag|>output<|plamo:key|>lang<|plamo:val|>ja<|plamo:msg|>一つ目。" +
+				"<|plamo:tag|>input<|plamo:msg|>Second." +
+				"<|plamo:tag|>output<|plamo:key|>lang<|plamo:val|>ja<|plamo:msg|>",
+		},
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
@@ -83,6 +118,7 @@ func TestBuildErrors(t *testing.T) {
 		{"blank", Request{Text: " \n\t", TargetLang: "en"}, ErrEmptyText},
 		{"reserved token", Request{Text: "a <|plamo:tag|> b", TargetLang: "en"}, ErrReservedToken},
 		{"reserved prefix only", Request{Text: "x<|plamo:", TargetLang: "en"}, ErrReservedToken},
+		{"reserved in history", Request{Text: "x", TargetLang: "en", History: []Pair{{"a<|plamo:msg|>", "b"}}}, ErrReservedToken},
 		{"form with non-ja", Request{Text: "x", TargetLang: "en", Form: FormPlain}, nil},
 		{"unknown form", Request{Text: "x", TargetLang: "ja", Form: "casual"}, nil},
 		{"uppercase lang", Request{Text: "x", TargetLang: "EN"}, nil},

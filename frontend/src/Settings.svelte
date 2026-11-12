@@ -6,6 +6,7 @@
   import type { Config } from "../bindings/github.com/dnrtk/popup_translator/internal/config/models";
   import type { Device } from "../bindings/github.com/dnrtk/popup_translator/internal/llama/models";
   import * as Ev from "../bindings/events";
+  import DownloadSection from "./DownloadSection.svelte";
 
   const contextSizes = [2048, 4096, 8192, 16384, 32768];
 
@@ -53,6 +54,12 @@
     kanaPercent = Math.round(d.config.kana_threshold * 1000) / 10;
     original = snapshot();
     loaded = true;
+  }
+
+  // Refresh only the model list (keeps unsaved edits in the form).
+  async function reloadModels() {
+    const d = await SettingsService.Load();
+    models = d.models ?? [];
   }
 
   async function load() {
@@ -247,6 +254,8 @@
         <p class="help small muted">デバイス・モデル・コンテキスト長・スレッド数を変えると、保存時に翻訳エンジンを再起動します。</p>
       </section>
 
+      <DownloadSection onInstalled={reloadModels} />
+
       <section aria-labelledby="hotkey">
         <h2 id="hotkey">ホットキー(Ctrl を押したまま C を 2 回)</h2>
         <div class="grid2">
@@ -293,6 +302,11 @@
           <label class="radio"><input type="radio" bind:group={cfg.popup_position} value="remember" /> 前回閉じた位置</label>
         </fieldset>
         <label class="check"><input type="checkbox" bind:checked={cfg.close_on_blur} /> ポップアップの外をクリックしたら閉じる</label>
+        <div class="field">
+          <label for="maxchars">一度に翻訳できる最大文字数</label>
+          <input id="maxchars" type="number" min="100" max="200000" step="1000" bind:value={cfg.max_chars} />
+          <p class="help small muted">長い文章は段落ごとに分けて順に翻訳します。</p>
+        </div>
       </section>
 
       <section aria-labelledby="other">

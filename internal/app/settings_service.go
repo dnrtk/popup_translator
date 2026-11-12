@@ -1,6 +1,7 @@
 package app
 
 import (
+	"fmt"
 	"runtime"
 
 	"github.com/dnrtk/popup_translator/internal/config"
@@ -55,4 +56,35 @@ func (s *SettingsService) OpenLogFolder() error {
 // Close hides the settings window.
 func (s *SettingsService) Close() {
 	s.app.HideSettings()
+}
+
+// allowedURLs are the only pages the settings screen may open in a browser.
+var allowedURLs = map[string]bool{
+	"https://plamo.preferredai.jp/info/plamo-community-license-ja": true,
+	"https://plamo.preferredai.jp/info/plamo-community-license-en": true,
+	"https://huggingface.co/pfnet/plamo-3-translate-0.8b":          true,
+	"https://forms.gle/mTL8tBLrMYXKNZD56":                          true,
+}
+
+// OpenURL opens one of the license or model card pages in the browser.
+func (s *SettingsService) OpenURL(url string) error {
+	if !allowedURLs[url] {
+		return fmt.Errorf("URL not allowed: %s", url)
+	}
+	return s.app.wapp.Browser.OpenURL(url)
+}
+
+// DownloadCatalog lists downloadable models and the download status.
+func (s *SettingsService) DownloadCatalog() DownloadCatalog {
+	return s.app.downloadCatalog()
+}
+
+// StartDownload downloads a model from Hugging Face (user-initiated only).
+func (s *SettingsService) StartDownload(file string) error {
+	return s.app.startDownload(file)
+}
+
+// CancelDownload stops the running download; it can be resumed later.
+func (s *SettingsService) CancelDownload() {
+	s.app.cancelDownload()
 }

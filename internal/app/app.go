@@ -26,6 +26,7 @@ import (
 	"github.com/dnrtk/popup_translator/internal/langdetect"
 	"github.com/dnrtk/popup_translator/internal/llama"
 	"github.com/dnrtk/popup_translator/internal/prompt"
+	"github.com/dnrtk/popup_translator/internal/segment"
 )
 
 // Event names sent to the frontend.
@@ -124,6 +125,10 @@ type App struct {
 	state    PopupState
 
 	stopHotkey context.CancelFunc
+
+	dlMu     sync.Mutex
+	dlCancel context.CancelFunc
+	dlStatus DownloadStatus
 }
 
 // New creates the core. Call Attach after the Wails app and windows exist.
@@ -194,6 +199,7 @@ func (a *App) Start() {
 
 // Shutdown stops background work and the server.
 func (a *App) Shutdown() {
+	a.cancelDownload()
 	if a.stopHotkey != nil {
 		a.stopHotkey()
 	}
@@ -268,6 +274,9 @@ func (a *App) SetPaused(p bool) {
 func (a *App) onServerState(st llama.State, err error) {
 	a.log.Info("llama-server state", "state", st.String(), "err", err)
 	a.updateTooltip(st)
+	if st == llama.StateReady {
+		go a.warmup()
+	}
 	if a.wapp != nil {
 		ev := ServerStateEvent{State: st.String()}
 		if err != nil {
@@ -293,6 +302,25 @@ func (a *App) onServerState(st llama.State, err error) {
 			})
 		}
 	}
+}
+
+// warmup sends a tiny translation right after the server becomes ready. The
+// first request after loading is ~1.5s slower (see FINDINGS, phase 2); doing
+// it in the background makes the user's first translation fast.
+func (a *App) warmup() {
+	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
+	defer cancel()
+	url, err := a.server.WaitReady(ctx)
+	if err != nil {
+		return
+	}
+	p, err := prompt.Build(prompt.Request{Text: "Hello.", TargetLang: "ja"})
+	if err != nil {
+		return
+	}
+	start := time.Now()
+	_, err = llama.NewClient(url).Complete(ctx, llama.CompletionRequest{Prompt: p, NPredict: 8, Stop: prompt.StopWords}, nil)
+	a.log.Info("warmup", "elapsed_ms", time.Since(start).Milliseconds(), "err", err)
 }
 
 // ServerState returns the current llama-server state for the frontend.
@@ -369,17 +397,17 @@ func (a *App) translate(text, target string, show bool) {
 	id := a.nextID
 	st := PopupState{ID: id, Source: text, Detected: detected, Target: target, Status: StatusTranslating}
 
+	form := prompt.FormNone
+	if target == "ja" {
+		form = prompt.Form(cfg.Form)
+	}
 	var buildErr error
-	var promptText string
 	if n := utf8.RuneCountInString(text); n > cfg.MaxChars {
 		buildErr = fmt.Errorf("テキストが長すぎます(%d 文字、上限 %d 文字)", n, cfg.MaxChars)
-	} else {
-		form := prompt.FormNone
-		if target == "ja" {
-			form = prompt.Form(cfg.Form)
-		}
-		promptText, buildErr = prompt.Build(prompt.Request{Text: text, TargetLang: target, Form: form})
-		if errors.Is(buildErr, prompt.ErrReservedToken) {
+	} else if _, err := prompt.Build(prompt.Request{Text: text, TargetLang: target, Form: form}); err != nil {
+		// Validates the whole text once (reserved tokens, language code).
+		buildErr = err
+		if errors.Is(err, prompt.ErrReservedToken) {
 			buildErr = errors.New("翻訳できない文字列(<|plamo:)が含まれています")
 		}
 	}
@@ -410,14 +438,40 @@ func (a *App) translate(text, target string, show bool) {
 	if buildErr != nil {
 		return
 	}
-	go a.run(ctx, id, promptText, utf8.RuneCountInString(text), cfg)
+	go a.run(ctx, id, text, target, form, cfg)
 }
 
 func (a *App) serverState() (llama.State, error) {
 	return a.server.State()
 }
 
-func (a *App) run(ctx context.Context, id uint64, promptText string, runes int, cfg config.Config) {
+// trimHistory drops the oldest pairs until the history fits in budget runes
+// (runes over-estimate tokens for most languages, so this is conservative).
+func trimHistory(h []prompt.Pair, budget int) []prompt.Pair {
+	total := 0
+	for _, p := range h {
+		total += utf8.RuneCountInString(p.Source) + utf8.RuneCountInString(p.Translation)
+	}
+	for len(h) > 0 && total > budget {
+		total -= utf8.RuneCountInString(h[0].Source) + utf8.RuneCountInString(h[0].Translation)
+		h = h[1:]
+	}
+	return h
+}
+
+// segmentLimit is the maximum source length (in runes) translated in one
+// request. Prompt, one history pair and output must fit in the context, so a
+// segment uses about a fifth of it.
+func segmentLimit(contextSize int) int {
+	return max(contextSize/5, 256)
+}
+
+// run translates text, splitting it into paragraphs when it is too long for
+// one request. Pieces are sent with the earlier pairs as history so the
+// terminology stays consistent; separators are copied verbatim. History only
+// grows by appending, so llama-server's prompt cache (cache_prompt) reuses
+// everything already processed and each request only evaluates the new piece.
+func (a *App) run(ctx context.Context, id uint64, text, target string, form prompt.Form, cfg config.Config) {
 	baseURL, err := a.server.WaitReady(ctx)
 	if err != nil {
 		if ctx.Err() == nil {
@@ -427,36 +481,59 @@ func (a *App) run(ctx context.Context, id uint64, promptText string, runes int, 
 	}
 	a.emitIfCurrent(id, EventStatus, StatusEvent{ID: id, Status: StatusTranslating})
 
+	limit := segmentLimit(cfg.ContextSize)
+	segs := segment.Split(text, limit)
+	client := llama.NewClient(baseURL)
 	start := time.Now()
-	res, err := llama.NewClient(baseURL).Complete(ctx, llama.CompletionRequest{
-		Prompt:   promptText,
-		NPredict: llama.NPredictFor(runes, cfg.ContextSize),
-		Stop:     prompt.StopWords,
-	}, func(tok string) {
-		a.emitIfCurrent(id, EventChunk, ChunkEvent{ID: id, Text: tok})
-	})
-	if err != nil {
-		if errors.Is(err, context.Canceled) {
+	var out strings.Builder
+	var history []prompt.Pair
+	tokens, pieces := 0, 0
+	for _, seg := range segs {
+		if !seg.Translate {
+			out.WriteString(seg.Text)
+			a.emitIfCurrent(id, EventChunk, ChunkEvent{ID: id, Text: seg.Text})
+			continue
+		}
+		p, err := prompt.Build(prompt.Request{Text: seg.Text, TargetLang: target, Form: form, History: history})
+		if err != nil {
+			a.emitError(id, "翻訳に失敗しました: "+err.Error())
 			return
 		}
-		a.log.Warn("completion failed", "id", id, "err", err)
-		a.emitError(id, "翻訳に失敗しました: "+err.Error())
-		return
+		runes := utf8.RuneCountInString(seg.Text)
+		res, err := client.Complete(ctx, llama.CompletionRequest{
+			Prompt:   p,
+			NPredict: llama.NPredictFor(runes, cfg.ContextSize),
+			Stop:     prompt.StopWords,
+		}, func(tok string) {
+			a.emitIfCurrent(id, EventChunk, ChunkEvent{ID: id, Text: tok})
+		})
+		if err != nil {
+			if errors.Is(err, context.Canceled) {
+				return
+			}
+			a.log.Warn("completion failed", "id", id, "piece", pieces, "err", err)
+			a.emitError(id, "翻訳に失敗しました: "+err.Error())
+			return
+		}
+		translated := prompt.TrimStop(res.Text)
+		out.WriteString(translated)
+		tokens += res.TokensPredicted
+		pieces++
+		history = trimHistory(append(history, prompt.Pair{Source: seg.Text, Translation: translated}), cfg.ContextSize*2/5)
 	}
-	out := prompt.TrimStop(res.Text)
-	a.log.Info("translated", "id", id, "tokens", res.TokensPredicted, "stop", res.StopType,
+	result := out.String()
+	a.log.Info("translated", "id", id, "pieces", pieces, "tokens", tokens,
 		"elapsed_ms", time.Since(start).Milliseconds())
 	if cfg.Debug {
-		a.log.Debug("translation", "id", id, "text", out)
+		a.log.Debug("translation", "id", id, "text", result)
 	}
 	a.mu.Lock()
 	if a.state.ID == id {
 		a.state.Status = StatusDone
 	}
 	a.mu.Unlock()
-	a.emitIfCurrent(id, EventDone, DoneEvent{ID: id, Text: out})
+	a.emitIfCurrent(id, EventDone, DoneEvent{ID: id, Text: result})
 }
-
 func (a *App) emitError(id uint64, msg string) {
 	a.mu.Lock()
 	if a.state.ID == id {

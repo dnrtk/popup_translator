@@ -39,9 +39,18 @@ var ErrReservedToken = errors.New("source text contains reserved PFML token pref
 // ErrEmptyText is returned for blank source text.
 var ErrEmptyText = errors.New("source text is empty")
 
+// Pair is an already translated source/translation pair used as history.
+type Pair struct {
+	Source      string
+	Translation string
+}
+
 // Request describes one translation.
 type Request struct {
-	Text       string
+	Text string
+	// History holds previous pairs of the same document, oldest first. The
+	// model uses them as context for consistent terminology.
+	History    []Pair
 	TargetLang string
 	// SourceLang is optional; empty lets the model detect the language.
 	SourceLang string
@@ -55,6 +64,11 @@ func Build(req Request) (string, error) {
 	}
 	if strings.Contains(req.Text, reservedPrefix) {
 		return "", ErrReservedToken
+	}
+	for _, p := range req.History {
+		if strings.Contains(p.Source, reservedPrefix) || strings.Contains(TrimStop(p.Translation), reservedPrefix) {
+			return "", ErrReservedToken
+		}
 	}
 	if err := ValidateLang(req.TargetLang); err != nil {
 		return "", fmt.Errorf("target_lang: %w", err)
@@ -77,6 +91,14 @@ func Build(req Request) (string, error) {
 	var b strings.Builder
 	b.Grow(len(req.Text) + 160)
 	b.WriteString(tagTok + "dataset" + msgTok + "translation")
+	for _, p := range req.History {
+		b.WriteString(tagTok + "input")
+		if req.SourceLang != "" {
+			b.WriteString(keyTok + "lang" + valTok + req.SourceLang)
+		}
+		b.WriteString(msgTok + p.Source)
+		b.WriteString(tagTok + "output" + keyTok + "lang" + valTok + req.TargetLang + msgTok + TrimStop(p.Translation))
+	}
 	b.WriteString(tagTok + "input")
 	if req.SourceLang != "" {
 		b.WriteString(keyTok + "lang" + valTok + req.SourceLang)

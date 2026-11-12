@@ -75,7 +75,7 @@ func Default() Config {
 		HotkeyIntervalMs: 400,
 		ClipboardDelayMs: 80,
 		KanaThreshold:    0.05,
-		MaxChars:         8000,
+		MaxChars:         20000,
 		TargetMode:       TargetModeAuto,
 		PopupPosition:    PopupPositionCursor,
 		Popup:            Geometry{Width: 560, Height: 420},

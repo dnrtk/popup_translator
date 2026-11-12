@@ -4,6 +4,8 @@ import (
 	"os"
 	"path/filepath"
 	"testing"
+
+	"github.com/dnrtk/popup_translator/internal/prompt"
 )
 
 func TestPlaceRect(t *testing.T) {
@@ -67,5 +69,25 @@ func TestResolveModel(t *testing.T) {
 	}
 	if _, err := resolveModel(filepath.Join(models, "missing.gguf"), exeDir); err == nil {
 		t.Error("expected error for missing explicit model")
+	}
+}
+
+func TestTrimHistory(t *testing.T) {
+	h := []prompt.Pair{{Source: "aaaa", Translation: "bbbb"}, {Source: "cc", Translation: "dd"}, {Source: "e", Translation: "f"}}
+	if got := trimHistory(h, 100); len(got) != 3 {
+		t.Errorf("fits: got %d pairs", len(got))
+	}
+	got := trimHistory(h, 6)
+	if len(got) != 2 || got[0].Source != "cc" {
+		t.Errorf("trim oldest: got %+v", got)
+	}
+	if got := trimHistory(h, 0); len(got) != 0 {
+		t.Errorf("zero budget: got %+v", got)
+	}
+}
+
+func TestSegmentLimit(t *testing.T) {
+	if segmentLimit(8192) != 1638 || segmentLimit(512) != 256 {
+		t.Error("unexpected segment limits")
 	}
 }
