@@ -1,4 +1,4 @@
-#Requires -Version 7
+﻿#Requires -Version 5.1
 <#
 .SYNOPSIS
   Builds a portable ZIP: dist/Yaku-<version>-win-x64.zip
@@ -17,13 +17,19 @@ param([switch]$SkipBuild)
 Set-StrictMode -Version Latest
 $ErrorActionPreference = 'Stop'
 
+# UTF-8 with BOM so Notepad and Windows PowerShell 5.1 read Japanese correctly.
+# (Set-Content -Encoding utf8BOM does not exist in 5.1.)
+function Write-Utf8Bom([string]$Path, [string]$Text) {
+    [IO.File]::WriteAllText($Path, $Text, (New-Object Text.UTF8Encoding $true))
+}
+
 $repo = Split-Path -Parent $PSScriptRoot
 Push-Location $repo
 try {
     $version = (Select-String -Path build/config.yml -Pattern '^\s*version:\s*"([^"]+)"').Matches[0].Groups[1].Value
     if (-not $SkipBuild) {
-        & pwsh -NoProfile -File scripts/fetch-llama.ps1
-        if ($LASTEXITCODE -ne 0) { throw 'fetch-llama failed' }
+        # Runs in this session; the script throws on failure.
+        & (Join-Path $PSScriptRoot 'fetch-llama.ps1')
         & wails3 build
         if ($LASTEXITCODE -ne 0) { throw 'wails3 build failed' }
     }
@@ -47,11 +53,11 @@ try {
     Copy-Item bin/llama/LICENSE-LLVM-OpenMP "$stage/licenses/LICENSE-LLVM-OpenMP.txt"
     Copy-Item docs/THIRD_PARTY_NOTICES.md "$stage/licenses/THIRD_PARTY_NOTICES.md"
 
-    Set-Content -Encoding utf8BOM -Path "$stage/models/README.txt" -Value @'
+    Write-Utf8Bom "$stage/models/README.txt" @'
 このフォルダに PLaMo 3 Translate の GGUF ファイルを置きます。
 Yaku の設定画面の「モデルのダウンロード」から取得できます。
 '@
-    Set-Content -Encoding utf8BOM -Path "$stage/README.txt" -Value @"
+    Write-Utf8Bom "$stage/README.txt" @"
 Yaku $version - ローカル翻訳ツール
 
 使い方
@@ -73,8 +79,18 @@ Yaku $version - ローカル翻訳ツール
 "@
 
     # Smoke test: the trimmed llama folder must still start.
-    $out = & "$stage/llama/llama-server.exe" --version 2>&1 | Out-String
-    if ($LASTEXITCODE -ne 0) { throw "packaged llama-server failed to start:`n$out" }
+    # llama-server prints its version to stderr; Windows PowerShell 5.1 turns
+    # redirected native stderr into errors, so relax the preference here.
+    $prevPref = $ErrorActionPreference
+    $ErrorActionPreference = 'Continue'
+    try {
+        $out = & "$stage/llama/llama-server.exe" --version 2>&1 | Out-String
+        $code = $LASTEXITCODE
+    }
+    finally {
+        $ErrorActionPreference = $prevPref
+    }
+    if ($code -ne 0) { throw "packaged llama-server failed to start:`n$out" }
 
     $zip = Join-Path $repo "dist/Yaku-$version-win-x64.zip"
     if (Test-Path $zip) { Remove-Item -Force $zip -Confirm:$false }

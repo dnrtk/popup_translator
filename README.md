@@ -16,7 +16,7 @@
 
 ## 開発環境のセットアップ
 
-必要なもの: Go 1.26 以上、Node.js、PowerShell 7
+必要なもの: Go 1.26 以上、Node.js。スクリプトは Windows PowerShell 5.1(Windows 標準)と PowerShell 7 のどちらでも動きます。
 
 ```powershell
 go install github.com/wailsapp/wails/v3/cmd/wails3@v3.1.0

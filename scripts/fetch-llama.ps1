@@ -1,4 +1,4 @@
-#Requires -Version 7
+﻿#Requires -Version 5.1
 <#
 .SYNOPSIS
   Downloads the pinned llama.cpp Windows build into bin/llama/.
@@ -15,6 +15,10 @@ param(
 
 Set-StrictMode -Version Latest
 $ErrorActionPreference = 'Stop'
+# Windows PowerShell 5.1: the progress bar slows Invoke-WebRequest down
+# dramatically, and older .NET defaults may not enable TLS 1.2.
+$ProgressPreference = 'SilentlyContinue'
+[Net.ServicePointManager]::SecurityProtocol = [Net.ServicePointManager]::SecurityProtocol -bor [Net.SecurityProtocolType]::Tls12
 
 $Version = 'b12283'
 $Pinned = @{
@@ -42,7 +46,7 @@ New-Item -ItemType Directory -Path $tmpDir | Out-Null
 try {
     $zip = Join-Path $tmpDir $entry.Asset
     Write-Host "Downloading $url"
-    Invoke-WebRequest -Uri $url -OutFile $zip
+    Invoke-WebRequest -UseBasicParsing -Uri $url -OutFile $zip
 
     $actual = (Get-FileHash -Algorithm SHA256 -Path $zip).Hash.ToLowerInvariant()
     if ($actual -ne $entry.Sha256) {
@@ -60,7 +64,7 @@ try {
     }
     # The release zip does not contain llama.cpp's own license (MIT); it must
     # ship with redistributed binaries.
-    Invoke-WebRequest -Uri "https://raw.githubusercontent.com/ggml-org/llama.cpp/$Version/LICENSE" `
+    Invoke-WebRequest -UseBasicParsing -Uri "https://raw.githubusercontent.com/ggml-org/llama.cpp/$Version/LICENSE" `
         -OutFile (Join-Path $destDir 'LICENSE-llama.cpp')
     Set-Content -Path $stampFile -Value $stamp -NoNewline
     Write-Host "Installed llama.cpp $stamp to $destDir"
